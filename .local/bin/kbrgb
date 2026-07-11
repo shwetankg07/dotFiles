@@ -46,7 +46,15 @@ Flags:
   -b N    brightness percent 0-100 (default 100)
   -s N    effect cycle period in seconds (default per effect)
 
-Colors are RRGGBB hex. Defaults come from the active omarchy theme.
+Tools:
+  kbrgb list                    list every effect name
+  kbrgb demo                    tour all effects, ~4s each (Ctrl-C stops)
+  kbrgb probe                   guided hardware diagnostic — run this to
+                                report support for a new laptop model
+  kbrgb status                  show device, saved state, daemon state
+
+Colors are RRGGBB hex. Effect defaults come from the active omarchy theme
+when available, with built-in fallbacks otherwise.
 """
 import fcntl, glob, math, os, random, re, signal, sys, time
 
@@ -113,11 +121,14 @@ def find_dev():
                 return "/dev/" + os.path.basename(p)
         except OSError:
             pass
-    die("ENEK5130 keyboard controller not found")
+    return None
 
 
 def open_dev():
     dev = find_dev()
+    if dev is None:
+        die("ENEK5130 keyboard controller not found "
+            "(check: grep -l ENEK5130 /sys/class/hidraw/*/device/uevent)")
     try:
         return open(dev, "rb+", buffering=0)
     except PermissionError:
@@ -203,8 +214,10 @@ def theme_colors():
 def stop_fx():
     try:
         pid = int(open(PIDFILE).read())
-        os.kill(pid, signal.SIGTERM)
-        time.sleep(0.05)
+        # only kill if that pid is actually a kbrgb process (stale-pid safety)
+        if b"kbrgb" in open(f"/proc/{pid}/cmdline", "rb").read():
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(0.05)
     except (OSError, ValueError):
         pass
     try:
@@ -576,14 +589,157 @@ def run_effect(effect, colors, period, bright):
     fn = FX_FUNCS[effect]
     dt = EFFECTS[effect][2]
     st = {}
-    with open_dev() as dev:
-        fd = dev.fileno()
-        t0 = time.monotonic()
-        while True:
+    dev = None
+    t0 = time.monotonic()
+    while True:
+        try:
+            if dev is None:
+                path = find_dev()
+                if path is None:
+                    raise OSError("device absent")
+                dev = open(path, "rb+", buffering=0)
             zones = fn(time.monotonic() - t0, period, colors, st)
             for mask, (r, g, b) in zip(ZONES, zones):
-                send(fd, mask, r, g, b, bmax)
+                send(dev.fileno(), mask, r, g, b, bmax)
             time.sleep(dt)
+        except OSError:
+            # device blipped (suspend/resume, i2c reset) — reopen and go on
+            try:
+                if dev:
+                    dev.close()
+            except OSError:
+                pass
+            dev = None
+            time.sleep(2)
+
+
+# ---------------------------------------------------------------- tools
+
+FALLBACK_COLORS = [(255, 42, 42), (0, 234, 255), (255, 179, 0), (0, 255, 65)]
+
+
+def theme_or_default():
+    try:
+        return theme_colors()
+    except SystemExit:
+        return FALLBACK_COLORS
+
+
+def cmd_status():
+    path = find_dev()
+    print(f"device:  {path or 'NOT FOUND'}")
+    try:
+        print(f"saved:   {open(STATE).read()}")
+    except OSError:
+        print("saved:   (nothing)")
+    try:
+        pid = int(open(PIDFILE).read())
+        alive = os.path.exists(f"/proc/{pid}")
+        print(f"daemon:  pid {pid} ({'running' if alive else 'dead, stale pidfile'})")
+    except (OSError, ValueError):
+        print("daemon:  not running")
+
+
+def cmd_demo():
+    stop_fx()
+    print("touring all effects, ~4s each — Ctrl-C to stop\n")
+    try:
+        with open_dev() as dev:
+            fd = dev.fileno()
+            for name in FX_FUNCS:
+                print(f"  {name}", flush=True)
+                p, _, dt = EFFECTS[name]
+                cols = DEFAULT_COLORS.get(name) or theme_or_default()
+                st = {}
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < 4.0:
+                    zones = FX_FUNCS[name](time.monotonic() - t0, p, cols, st)
+                    for mask, (r, g, b) in zip(ZONES, zones):
+                        send(fd, mask, r, g, b)
+                    time.sleep(dt)
+    except KeyboardInterrupt:
+        print()
+    print("\ndemo over — apply one with: kbrgb <effect>")
+
+
+def cmd_probe():
+    """Guided diagnostic for testing new hardware. Produces a paste-ready
+    report for a GitHub issue."""
+    stop_fx()
+    path = find_dev()
+    if path is None:
+        print("RESULT: no ENEK5130 device — this tool does not apply to "
+              "your machine as-is.\nDevices present:")
+        for p in glob.glob("/sys/class/hidraw/hidraw*"):
+            uev = dict(l.split("=", 1) for l in
+                       open(p + "/device/uevent").read().splitlines())
+            print(f"  {p}: {uev.get('HID_NAME', '?')}")
+        sys.exit(1)
+
+    answers = []
+
+    def step(desc, fn):
+        fn()
+        ans = input(f"[{len(answers) + 1}] {desc}\n    what you see> ").strip()
+        answers.append((desc, ans))
+
+    print(f"kbrgb hardware probe — device {path}")
+    print("answer each question with what your keyboard actually shows.\n")
+    try:
+        with open(path, "rb+", buffering=0) as f:
+            fd = f.fileno()
+
+            def dark():
+                for m in ZONES:
+                    send(fd, m, 0, 0, 0)
+
+            dark()
+            step("zone 1 (leftmost) RED only?",
+                 lambda: send(fd, 0x01, 255, 0, 0))
+            step("zone 2 GREEN added?", lambda: send(fd, 0x02, 0, 255, 0))
+            step("zone 3 BLUE added?", lambda: send(fd, 0x04, 0, 0, 255))
+            step("zone 4 (rightmost) WHITE added?",
+                 lambda: send(fd, 0x08, 255, 255, 255))
+
+            def all_mask():
+                dark()
+                send(fd, 0x0F, 255, 0, 255)
+            step("mask 0x0f: ALL zones magenta? full brightness or dim?",
+                 all_mask)
+
+            def red15():
+                for m in ZONES:
+                    send(fd, m, 255, 0, 0, 15)
+            step("red at brightness byte 15 — how bright?", red15)
+
+            def red100():
+                for m in ZONES:
+                    send(fd, m, 255, 0, 0, 100)
+            step("red at brightness byte 100 — brighter than before?", red100)
+
+            def burst():
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < 3.0:
+                    t = time.monotonic() - t0
+                    for i, m in enumerate(ZONES):
+                        send(fd, m, *hsv(t / 2 + i / 4))
+                    time.sleep(0.05)
+            step("3s animation burst — smooth, or flicker/stalls?", burst)
+            dark()
+    except KeyboardInterrupt:
+        print("\nprobe aborted")
+        sys.exit(1)
+
+    model = "?"
+    try:
+        model = open("/sys/class/dmi/id/product_name").read().strip()
+    except OSError:
+        pass
+    print("\n--- copy everything below into a GitHub issue ---")
+    print(f"Model: {model}")
+    print(f"Device: {path}")
+    for desc, ans in answers:
+        print(f"- {desc} -> {ans}")
 
 
 # ---------------------------------------------------------------- main
@@ -615,6 +771,19 @@ def main():
         print(__doc__.strip())
         return
 
+    if args == ["list"]:
+        print("\n".join(EFFECTS))
+        return
+    if args == ["status"]:
+        cmd_status()
+        return
+    if args == ["demo"]:
+        cmd_demo()
+        return
+    if args == ["probe"]:
+        cmd_probe()
+        return
+
     def save():
         if restoring:
             return
@@ -631,7 +800,7 @@ def main():
             die(f"{effect} takes up to {max_cols} hex color(s)")
         colors = [parse_hex(a) for a in rest]
         if not colors:
-            colors = DEFAULT_COLORS.get(effect) or theme_colors()
+            colors = DEFAULT_COLORS.get(effect) or theme_or_default()
         period = period or d_period
         stop_fx()
         save()
