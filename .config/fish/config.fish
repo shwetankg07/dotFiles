@@ -44,3 +44,8 @@ set -gx VISUAL nvim
 
 
 alias config='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
+
+
+direnv hook fish | source
+
+

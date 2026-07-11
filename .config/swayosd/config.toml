@@ -1,0 +1,5 @@
+[server]
+show_percentage = true
+max_volume = 130
+style = "./style.css"
+top_margin = 0.05
