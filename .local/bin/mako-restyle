@@ -1,0 +1,32 @@
+#!/bin/bash
+# Re-apply personal mako layout on top of the active omarchy theme's colors.
+#
+# omarchy theme set does `rm -rf` on current/theme and rebuilds it, and
+# omarchy update can refresh configs -- both of which drop custom mako
+# settings. This script re-merges them and is idempotent, so it is safe to
+# run from the theme-set and post-update hooks.
+
+THEME_MAKO="$HOME/.config/omarchy/current/theme/mako.ini"
+STYLE="$HOME/.config/omarchy/mako-style.conf"
+
+[[ -f $STYLE ]] || exit 0
+
+# Pull just the color lines from whatever theme is currently active.
+colors=""
+if [[ -f $THEME_MAKO ]]; then
+  colors=$(grep -E '^(text-color|border-color|background-color|progress-color)=' "$THEME_MAKO")
+fi
+
+# Fall back to a readable dark default if the theme ships no mako colors.
+if [[ -z $colors ]]; then
+  colors=$'text-color=#ffffff\nborder-color=#f76e78\nbackground-color=#040303'
+fi
+
+tmp=$(mktemp)
+{
+  printf '%s\n\n' "$colors"
+  cat "$STYLE"
+} >"$tmp"
+mv "$tmp" "$THEME_MAKO"
+
+pgrep -x mako >/dev/null && makoctl reload

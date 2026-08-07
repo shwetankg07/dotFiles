@@ -1,0 +1,5 @@
+#!/bin/bash
+# Re-apply personal mako layout (size, fonts, 2s timeout) on top of the
+# active theme's colors. Both `omarchy theme set` and `omarchy update` can
+# reset mako.ini, so this runs after each.
+"$HOME/.local/bin/mako-restyle" || true
