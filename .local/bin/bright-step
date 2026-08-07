@@ -1,0 +1,16 @@
+#!/bin/bash
+# Brightness step helper. Usage: bright-step up|down
+#
+# Floors at raw 20/400 so the panel never blacks out on the way down.
+# Also renders the SwayOSD popup, which plain brightnessctl does not do.
+DEVICE=intel_backlight
+STEP=5
+MIN_RAW=20
+
+case "$1" in
+  up)   brightnessctl -d "$DEVICE" set "+${STEP}%" >/dev/null ;;
+  down) brightnessctl -d "$DEVICE" set "${STEP}%-" --min-value="$MIN_RAW" >/dev/null ;;
+  *)    echo "usage: bright-step up|down" >&2; exit 1 ;;
+esac
+
+omarchy-swayosd-brightness "$(brightnessctl -d "$DEVICE" -m | cut -d',' -f4 | tr -d '%')"

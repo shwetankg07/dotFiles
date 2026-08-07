@@ -1,0 +1,14 @@
+#!/bin/bash
+# Volume step helper. Usage: vol-step up|down
+#
+# The keyboard knob emits 2 key events per detent, so one detent moves
+# volume by 2 * STEP. STEP=2 -> 4% per detent, 2% per media-key press.
+STEP=2
+
+case "$1" in
+  up)   DELTA="+$STEP" ;;
+  down) DELTA="-$STEP" ;;
+  *)    echo "usage: vol-step up|down" >&2; exit 1 ;;
+esac
+
+exec swayosd-client --monitor "$(omarchy-hyprland-monitor-focused)" --output-volume "$DELTA"
